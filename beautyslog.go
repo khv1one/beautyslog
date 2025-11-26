@@ -1,4 +1,13 @@
-package beautyhandler
+// Package beautyhandler provides a fast and colorful slog.Handler
+// implementation optimized for human‑friendly terminal output.
+//
+// It formats log entries with color, aligned levels, grouped
+// attributes, efficient buffer pooling, and zero-reflection hot paths.
+//
+// Example usage:
+// logger := slog.New(beautyhandler.New(os.Stdout, &slog.HandlerOptions{}))
+// logger.Info("hello", "user", "alice")
+package beautyslog
 
 import (
 	"context"
@@ -45,6 +54,11 @@ var levelNames = map[slog.Level]string{
 	slog.LevelError: "ERROR",
 }
 
+// PrettyTextHandler is a human-friendly slog handler that prints
+// colorized, aligned, low-allocation log lines.
+//
+// PrettyTextHandler supports slog groups, ReplaceAttr, AddSource, and
+// attribute propagation. It is safe for concurrent use.
 type PrettyTextHandler struct {
 	opts     slog.HandlerOptions
 	out      io.Writer
@@ -54,6 +68,12 @@ type PrettyTextHandler struct {
 	bufPool  *sync.Pool
 }
 
+// New creates a new PrettyTextHandler writing output to 'out'.
+//
+// The handler respects slog.HandlerOptions:
+// - Level: minimum log level
+// - AddSource: include file:line
+// - ReplaceAttr: transforms attributes
 func New(out io.Writer, opts *slog.HandlerOptions) *PrettyTextHandler {
 	h := &PrettyTextHandler{out: out}
 	if opts != nil {
@@ -73,10 +93,13 @@ func New(out io.Writer, opts *slog.HandlerOptions) *PrettyTextHandler {
 	return h
 }
 
+// Enabled reports whether a log entry of the given level should be emitted.
 func (h *PrettyTextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return level >= h.opts.Level.Level()
 }
 
+// Handle formats and writes a slog.Record to the output.
+// It reuses an internal buffer pool for efficiency.
 func (h *PrettyTextHandler) Handle(ctx context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -90,7 +113,7 @@ func (h *PrettyTextHandler) Handle(ctx context.Context, r slog.Record) error {
 	buf := (*bufPtr)[:0]
 
 	buf = append(buf, colorTime...)
-	buf = r.Time.AppendFormat(buf, "23:01:01.000")
+	buf = r.Time.AppendFormat(buf, "15:04:05.999")
 	buf = append(buf, colorReset...)
 	buf = append(buf, ' ')
 
@@ -277,6 +300,8 @@ func appendDuration(buf []byte, d time.Duration) []byte {
 	return buf
 }
 
+// WithAttrs returns a new handler with additional pre‑attached attributes.
+// The attributes will be written for every log entry.
 func (h *PrettyTextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h
@@ -295,6 +320,8 @@ func (h *PrettyTextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	}
 }
 
+// WithGroup returns a new handler with the given attribute group.
+// Nested groups are supported using dot notation.
 func (h *PrettyTextHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h

@@ -1,0 +1,23 @@
+<svg width="640" height="220" viewBox="0 0 640 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="beautyslog logo">
+<defs>
+<linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="0%">
+<stop offset="0%" stop-color="#34d399" />
+<stop offset="100%" stop-color="#0ea5e9" />
+</linearGradient>
+<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+<feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.15" />
+</filter>
+</defs>
+<rect width="100%" height="100%" rx="18" fill="#0f172a" />
+<g transform="translate(40,40)" filter="url(#shadow)">
+<rect width="200" height="140" rx="12" fill="#1e293b" stroke="#334155" stroke-width="2" />
+<circle cx="24" cy="24" r="6" fill="#ef4444" />
+<circle cx="48" cy="24" r="6" fill="#f59e0b" />
+<circle cx="72" cy="24" r="6" fill="#10b981" />
+<path d="M30 60 L170 60" stroke="url(#lg)" stroke-width="6" stroke-linecap="round" />
+<path d="M30 90 L150 90" stroke="#38bdf8" stroke-width="6" stroke-linecap="round" />
+<path d="M30 120 L130 120" stroke="#f472b6" stroke-width="6" stroke-linecap="round" />
+</g>
+<text x="280" y="120" font-family="Inter, sans-serif" font-size="52" fill="#ffffff" font-weight="600">beautyslog</text>
+<text x="282" y="155" font-family="Inter, sans-serif" font-size="16" fill="#93c5fd">Pretty &amp; fast slog.Handler for Go</text>
+</svg>
