@@ -53,10 +53,13 @@ func BenchmarkSlogTextHandlerWithSource(b *testing.B) {
 }
 
 func BenchmarkPrettyTextHandlerWithSource(b *testing.B) {
-	handler := New(io.Discard, &slog.HandlerOptions{
+	handler, err := New(io.Discard, "{time:15:04:05(gray)} {level:>5(blue)} {source} {message(white)} {attrs}", &slog.HandlerOptions{
 		AddSource: true,
 		Level:     slog.LevelInfo,
 	})
+	if err != nil {
+		b.Fatal(err)
+	}
 	record := createTestRecord()
 
 	b.ResetTimer()
@@ -87,10 +90,13 @@ func BenchmarkSlogTextHandlerWithoutSource(b *testing.B) {
 }
 
 func BenchmarkPrettyTextHandlerWithoutSource(b *testing.B) {
-	handler := New(io.Discard, &slog.HandlerOptions{
+	handler, err := New(io.Discard, "{time:15:04:05(gray)} {level:>5(blue)} {message(white)} {attrs}", &slog.HandlerOptions{
 		AddSource: false,
 		Level:     slog.LevelInfo,
 	})
+	if err != nil {
+		b.Fatal(err)
+	}
 	record := createTestRecord()
 
 	b.ResetTimer()
@@ -104,7 +110,7 @@ func BenchmarkPrettyTextHandlerWithoutSource(b *testing.B) {
 }
 
 func TestPrint(_ *testing.T) {
-	prettyHandler := New(os.Stdout, &slog.HandlerOptions{
+	prettyHandler, err := New(os.Stdout, "{attrs} {time:15:04:05(gray)} {level:>5(blue)} {source} {message(red)}", &slog.HandlerOptions{
 		Level:     slog.LevelDebug,
 		AddSource: true,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
@@ -114,6 +120,9 @@ func TestPrint(_ *testing.T) {
 			return a
 		},
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	logger := slog.New(prettyHandler)
 
@@ -129,4 +138,209 @@ func TestPrint(_ *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	logger.Info("duration", slog.Duration("ddd", time.Hour), slog.Duration("ms", time.Microsecond))
 	logger.Info("without slog types", "123k", 123, "dur", time.Hour, "b", true, "er", errors.New("dss"))
+}
+
+func TestNew(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		wantErr bool
+	}{
+		{
+			name:    "simple format",
+			format:  "{time} {level} {message} {attrs}",
+			wantErr: false,
+		},
+		{
+			name:    "format with time format",
+			format:  "{time:15:04:05} {level} {message} {attrs}",
+			wantErr: false,
+		},
+		{
+			name:    "format with colors",
+			format:  "{time:15:04:05(gray)} {level:>5(blue)} {source:<20(0x666666)} {message(white)} {attrs}",
+			wantErr: false,
+		},
+		{
+			name:    "format with alignment",
+			format:  "{level:>5} {source:<20} {message}",
+			wantErr: false,
+		},
+		{
+			name:    "format with predefined time",
+			format:  "{time:RFC3339} {level} {message}",
+			wantErr: false,
+		},
+		{
+			name:    "format without attrs",
+			format:  "{time} {level} {message}",
+			wantErr: false,
+		},
+		{
+			name:    "format with literal text",
+			format:  "[{time}] {level} - {message}",
+			wantErr: false,
+		},
+		{
+			name:    "unmatched brace",
+			format:  "{time {level}",
+			wantErr: true,
+		},
+		{
+			name:    "unknown placeholder",
+			format:  "{unknown} {level}",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(io.Discard, tt.format, nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("New() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseColor(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantAnsi string
+		wantHex  uint32
+		isHex    bool
+		isEmpty  bool
+	}{
+		{
+			name:     "named color gray",
+			input:    "gray",
+			wantAnsi: "\033[90m",
+		},
+		{
+			name:     "named color blue",
+			input:    "blue",
+			wantAnsi: "\033[34m",
+		},
+		{
+			name:    "hex color",
+			input:   "0xFF5733",
+			wantHex: 0xFF5733,
+			isHex:   true,
+		},
+		{
+			name:    "hex color with hash",
+			input:   "#FF5733",
+			wantHex: 0xFF5733,
+			isHex:   true,
+		},
+		{
+			name:    "empty color",
+			input:   "",
+			isEmpty: true,
+		},
+		{
+			name:    "unknown color",
+			input:   "unknowncolor",
+			isEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseColor(tt.input)
+			if got.isEmpty != tt.isEmpty {
+				t.Errorf("parseColor() isEmpty = %v, want %v", got.isEmpty, tt.isEmpty)
+			}
+			if !tt.isEmpty && !tt.isHex && got.ansi != tt.wantAnsi {
+				t.Errorf("parseColor() ansi = %q, want %q", got.ansi, tt.wantAnsi)
+			}
+			if tt.isHex && got.hex != tt.wantHex {
+				t.Errorf("parseColor() hex = %x, want %x", got.hex, tt.wantHex)
+			}
+		})
+	}
+}
+
+func TestAppendTime(t *testing.T) {
+	h := &PrettyTextHandler{}
+	testTime := time.Date(2024, 1, 15, 10, 30, 45, 123000000, time.UTC)
+
+	tests := []struct {
+		format   string
+		expected string
+	}{
+		{"", "10:30:45.123"},
+		{"15:04:05", "10:30:45"},
+		{"2006-01-02", "2024-01-15"},
+		{"RFC3339", "2024-01-15T10:30:45Z"},
+		{"Unix", "1705314645"},
+		{"UnixMilli", "1705314645123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			buf := make([]byte, 0, 64)
+			got := string(h.appendTime(buf, testTime, tt.format))
+			if got != tt.expected {
+				t.Errorf("appendTime() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAppendAligned(t *testing.T) {
+	h := &PrettyTextHandler{}
+
+	tests := []struct {
+		input    string
+		width    int
+		align    alignment
+		expected string
+	}{
+		{"INFO", 6, alignRight, "  INFO"},
+		{"INFO", 6, alignLeft, "INFO  "},
+		{"INFO", 6, alignNone, "INFO"},
+		{"INFO", 2, alignRight, "INFO"},
+		{"INFO", 0, alignRight, "INFO"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			buf := make([]byte, 0, 64)
+			got := string(h.appendAligned(buf, tt.input, tt.width, tt.align))
+			if got != tt.expected {
+				t.Errorf("appendAligned() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWithAttrs(t *testing.T) {
+	h1, err := New(io.Discard, "{time} {level} {message} {attrs}", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h2 := h1.WithAttrs([]slog.Attr{
+		slog.String("app", "test"),
+		slog.String("env", "dev"),
+	})
+
+	if h2 == h1 {
+		t.Error("WithAttrs should return a new handler")
+	}
+}
+
+func TestWithGroup(t *testing.T) {
+	h1, err := New(io.Discard, "{time} {level} {message} {attrs}", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h2 := h1.WithGroup("request")
+
+	if h2 == h1 {
+		t.Error("WithGroup should return a new handler")
+	}
 }
