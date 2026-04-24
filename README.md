@@ -25,6 +25,7 @@ It is **2x faster than the default `slog.TextHandler`** and performs **3x fewer 
 * Fast and allocation‑efficient (`sync.Pool` for buffers)
 * Fully compatible with `log/slog`
 * Supports groups, attributes, `ReplaceAttr`, `AddSource`
+* Customizable field order and color scheme
 * Clean, aligned output
 * Safe for concurrent use
 * Works as a drop‑in replacement for any slog handler
@@ -44,13 +45,25 @@ go get github.com/khv1one/beautyslog
 ### Basic Setup
 
 ```go
-logger := slog.New(beautyslog.New(os.Stdout, &slog.HandlerOptions{
-    Level: slog.LevelDebug,
-    AddSource: true,
-}))
+package main
 
-logger.Info("server started", "port", 8080)
-logger.Debug("processing request", "id", 123)
+import (
+    "log/slog"
+    "os"
+
+    "github.com/khv1one/beautyslog"
+)
+
+func main() {
+    handler := beautyslog.New(os.Stdout, &beautyslog.HandlerOptions{
+        Level:     slog.LevelDebug,
+        AddSource: true,
+    })
+    logger := slog.New(handler)
+
+    logger.Info("server started", "port", 8080)
+    logger.Debug("processing request", "id", 123)
+}
 ```
 
 ### Using groups and attributes
@@ -69,7 +82,7 @@ log.WithGroup("db").Info("query executed",
 ### Using ReplaceAttr
 
 ```go
-handler := beautyslog.New(os.Stdout, &slog.HandlerOptions{
+handler := beautyslog.New(os.Stdout, &beautyslog.HandlerOptions{
     ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
         if a.Key == slog.TimeKey {
             return slog.String(a.Key, time.Now().Format(time.DateTime))
@@ -77,6 +90,56 @@ handler := beautyslog.New(os.Stdout, &slog.HandlerOptions{
         return a
     },
 })
+```
+
+### Customizing field order
+
+Control which fields appear and in what order using the `Fields` option.
+Omitted fields are skipped without leaving extra spaces.
+
+```go
+handler := beautyslog.New(os.Stdout, &beautyslog.HandlerOptions{
+    Fields: []beautyslog.Field{
+        beautyslog.LevelField,
+        beautyslog.MessageField,
+        beautyslog.TimeField,
+    },
+})
+```
+
+Available fields: `TimeField`, `SourceField`, `LevelField`, `MessageField`, `AttrsField`.
+When `Fields` is nil or empty, the default order `[Time, Source, Level, Message, Attrs]` is used.
+
+### Customizing colors
+
+Override any ANSI color via `ColorScheme`. Unset fields fall back to the built‑in defaults.
+
+```go
+handler := beautyslog.New(os.Stdout, &beautyslog.HandlerOptions{
+    Colors: &beautyslog.ColorScheme{
+        Time:  []byte("\033[96m"), // cyan
+        Debug: []byte("\033[35m"), // magenta
+        Info:  []byte("\033[32m"), // green
+        Warn:  []byte("\033[33m"), // yellow
+        Error: []byte("\033[31m"), // red
+        Key:   []byte("\033[37m"), // white
+        Value: []byte("\033[93m"), // bright yellow
+        Group: []byte("\033[95m"), // bright magenta
+    },
+})
+```
+
+### Custom log levels
+
+`beautyslog` handles custom `slog.Level` values gracefully. Unknown levels fall back to `Level.String()` and are rendered with the default color.
+
+```go
+var levelTrace = slog.Level(-8)
+logger := slog.New(beautyslog.New(os.Stdout, &beautyslog.HandlerOptions{
+    Level: levelTrace,
+}))
+
+logger.Log(context.Background(), levelTrace, "trace message")
 ```
 
 ---

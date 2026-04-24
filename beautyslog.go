@@ -5,7 +5,7 @@
 // attributes, efficient buffer pooling, and zero-reflection hot paths.
 //
 // Example usage:
-// logger := slog.New(beautyhandler.New(os.Stdout, &slog.HandlerOptions{}))
+// logger := slog.New(beautyslog.New(os.Stdout, &beautyslog.HandlerOptions{}))
 // logger.Info("hello", "user", "alice")
 package beautyslog
 
@@ -26,6 +26,44 @@ const (
 	initialBufferSize = 512
 	maxBufferSize     = 4096
 )
+
+// Field identifies a component of a log entry.
+type Field int
+
+const (
+	TimeField Field = iota
+	SourceField
+	LevelField
+	MessageField
+	AttrsField
+)
+
+// defaultFields is the standard order of log fields.
+var defaultFields = []Field{TimeField, SourceField, LevelField, MessageField, AttrsField}
+
+// ColorScheme holds per-component ANSI color overrides.
+// Nil fields fall back to the package-level default colors.
+type ColorScheme struct {
+	Time   []byte
+	Source []byte
+	Debug  []byte
+	Info   []byte
+	Warn   []byte
+	Error  []byte
+	Key    []byte
+	Value  []byte
+	Group  []byte
+	Reset  []byte
+}
+
+// HandlerOptions configures PrettyTextHandler.
+type HandlerOptions struct {
+	AddSource   bool
+	Level       slog.Leveler
+	ReplaceAttr func(groups []string, a slog.Attr) slog.Attr
+	Fields      []Field
+	Colors      *ColorScheme
+}
 
 var (
 	colorReset  = []byte("\033[0m")
@@ -60,7 +98,7 @@ var levelNames = map[slog.Level]string{
 // PrettyTextHandler supports slog groups, ReplaceAttr, AddSource, and
 // attribute propagation. It is safe for concurrent use.
 type PrettyTextHandler struct {
-	opts     slog.HandlerOptions
+	opts     HandlerOptions
 	out      io.Writer
 	mu       sync.Mutex
 	group    string
@@ -70,17 +108,25 @@ type PrettyTextHandler struct {
 
 // New creates a new PrettyTextHandler writing output to 'out'.
 //
-// The handler respects slog.HandlerOptions:
-// - Level: minimum log level
-// - AddSource: include file:line
-// - ReplaceAttr: transforms attributes
-func New(out io.Writer, opts *slog.HandlerOptions) *PrettyTextHandler {
+// The handler respects HandlerOptions:
+//   - Level: minimum log level
+//   - AddSource: include file:line
+//   - ReplaceAttr: transforms attributes
+//   - Fields: order of log components; defaults to [Time, Source, Level, Message, Attrs]
+//   - Colors: per-component ANSI colors; uses built-in defaults when nil
+func New(out io.Writer, opts *HandlerOptions) *PrettyTextHandler {
 	h := &PrettyTextHandler{out: out}
 	if opts != nil {
 		h.opts = *opts
 	}
 	if h.opts.Level == nil {
 		h.opts.Level = slog.LevelInfo
+	}
+	if len(h.opts.Fields) == 0 {
+		h.opts.Fields = defaultFields
+	}
+	if h.opts.Colors == nil {
+		h.opts.Colors = &ColorScheme{}
 	}
 
 	h.bufPool = &sync.Pool{
@@ -98,6 +144,73 @@ func (h *PrettyTextHandler) Enabled(ctx context.Context, level slog.Level) bool 
 	return level >= h.opts.Level.Level()
 }
 
+func (h *PrettyTextHandler) resetColor() []byte {
+	if h.opts.Colors.Reset != nil {
+		return h.opts.Colors.Reset
+	}
+	return colorReset
+}
+
+func (h *PrettyTextHandler) timeColor() []byte {
+	if h.opts.Colors.Time != nil {
+		return h.opts.Colors.Time
+	}
+	return colorTime
+}
+
+func (h *PrettyTextHandler) sourceColor() []byte {
+	if h.opts.Colors.Source != nil {
+		return h.opts.Colors.Source
+	}
+	return colorTime
+}
+
+func (h *PrettyTextHandler) keyColor() []byte {
+	if h.opts.Colors.Key != nil {
+		return h.opts.Colors.Key
+	}
+	return colorKey
+}
+
+func (h *PrettyTextHandler) valueColor() []byte {
+	if h.opts.Colors.Value != nil {
+		return h.opts.Colors.Value
+	}
+	return colorValue
+}
+
+func (h *PrettyTextHandler) groupColor() []byte {
+	if h.opts.Colors.Group != nil {
+		return h.opts.Colors.Group
+	}
+	return colorPurple
+}
+
+func (h *PrettyTextHandler) levelColor(lvl slog.Level) []byte {
+	switch lvl {
+	case slog.LevelDebug:
+		if h.opts.Colors.Debug != nil {
+			return h.opts.Colors.Debug
+		}
+	case slog.LevelInfo:
+		if h.opts.Colors.Info != nil {
+			return h.opts.Colors.Info
+		}
+	case slog.LevelWarn:
+		if h.opts.Colors.Warn != nil {
+			return h.opts.Colors.Warn
+		}
+	case slog.LevelError:
+		if h.opts.Colors.Error != nil {
+			return h.opts.Colors.Error
+		}
+	}
+	if c, ok := levelColors[lvl]; ok {
+		return c
+	}
+	return colorWhite
+}
+
 // Handle formats and writes a slog.Record to the output.
 // It reuses an internal buffer pool for efficiency.
 func (h *PrettyTextHandler) Handle(ctx context.Context, r slog.Record) error {
@@ -112,15 +225,36 @@ func (h *PrettyTextHandler) Handle(ctx context.Context, r slog.Record) error {
 	}()
 	buf := (*bufPtr)[:0]
 
-	buf = append(buf, colorTime...)
-	buf = r.Time.AppendFormat(buf, "15:04:05.999")
-	buf = append(buf, colorReset...)
-	buf = append(buf, ' ')
+	var groups []string
+	if h.group != "" {
+		groups = strings.Split(h.group, ".")
+	}
 
-	if h.opts.AddSource && r.PC != 0 {
-		fs := runtime.CallersFrames([]uintptr{r.PC})
-		f, _ := fs.Next()
-		if f.File != "" {
+	needSpace := false
+
+	for _, field := range h.opts.Fields {
+		switch field {
+		case TimeField:
+			if needSpace {
+				buf = append(buf, ' ')
+			}
+			buf = append(buf, h.timeColor()...)
+			buf = r.Time.AppendFormat(buf, "15:04:05.999")
+			buf = append(buf, h.resetColor()...)
+			needSpace = true
+
+		case SourceField:
+			if !h.opts.AddSource || r.PC == 0 {
+				continue
+			}
+			fs := runtime.CallersFrames([]uintptr{r.PC})
+			f, _ := fs.Next()
+			if f.File == "" {
+				continue
+			}
+			if needSpace {
+				buf = append(buf, ' ')
+			}
 			file := f.File
 			for i := len(file) - 1; i >= 0; i-- {
 				if file[i] == '/' || file[i] == '\\' {
@@ -128,77 +262,84 @@ func (h *PrettyTextHandler) Handle(ctx context.Context, r slog.Record) error {
 					break
 				}
 			}
-			buf = append(buf, colorTime...)
+			buf = append(buf, h.sourceColor()...)
 			buf = append(buf, file...)
 			buf = append(buf, ':')
 			buf = strconv.AppendInt(buf, int64(f.Line), 10)
-			buf = append(buf, colorReset...)
-			buf = append(buf, ' ')
-		}
-	}
+			buf = append(buf, h.resetColor()...)
+			needSpace = true
 
-	levelColor, ok := levelColors[r.Level]
-	if !ok {
-		levelColor = colorWhite
-	}
-	buf = append(buf, levelColor...)
-	levelStr := levelNames[r.Level]
-	buf = append(buf, levelStr...)
-	buf = append(buf, colorReset...)
-	padding := 5 - len(levelStr)
-	for i := 0; i < padding; i++ {
-		buf = append(buf, ' ')
-	}
-	buf = append(buf, ' ')
-
-	buf = append(buf, levelColor...)
-	buf = append(buf, r.Message...)
-	buf = append(buf, colorReset...)
-
-	var groups []string
-	if h.group != "" {
-		groups = strings.Split(h.group, ".")
-	}
-
-	appendAttr := func(a slog.Attr) {
-		if h.opts.ReplaceAttr != nil {
-			a = h.opts.ReplaceAttr(groups, a)
-			if a.Equal(slog.Attr{}) {
-				return
+		case LevelField:
+			if needSpace {
+				buf = append(buf, ' ')
 			}
+			levelColor := h.levelColor(r.Level)
+			buf = append(buf, levelColor...)
+			levelStr, ok := levelNames[r.Level]
+			if !ok {
+				levelStr = r.Level.String()
+			}
+			buf = append(buf, levelStr...)
+			buf = append(buf, h.resetColor()...)
+			padding := 5 - len(levelStr)
+			for i := 0; i < padding; i++ {
+				buf = append(buf, ' ')
+			}
+			needSpace = true
+
+		case MessageField:
+			if needSpace {
+				buf = append(buf, ' ')
+			}
+			buf = append(buf, h.levelColor(r.Level)...)
+			buf = append(buf, r.Message...)
+			buf = append(buf, h.resetColor()...)
+			needSpace = true
+
+		case AttrsField:
+			for _, a := range h.preAttrs {
+				buf, needSpace = h.appendAttr(buf, groups, a, needSpace)
+			}
+			r.Attrs(func(a slog.Attr) bool {
+				buf, needSpace = h.appendAttr(buf, groups, a, needSpace)
+				return true
+			})
 		}
-
-		buf = append(buf, ' ')
-		buf = append(buf, colorKey...)
-		if h.group != "" {
-			buf = append(buf, h.group...)
-			buf = append(buf, '.')
-			buf = append(buf, a.Key...)
-		} else {
-			buf = append(buf, a.Key...)
-		}
-		buf = append(buf, colorReset...)
-		buf = append(buf, '=')
-		buf = append(buf, colorValue...)
-		buf = appendValue(buf, a.Value)
-
-		buf = append(buf, colorReset...)
 	}
-
-	for _, a := range h.preAttrs {
-		appendAttr(a)
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		appendAttr(a)
-		return true
-	})
 
 	buf = append(buf, '\n')
 	_, err := h.out.Write(buf)
 	return err
 }
 
-func appendValue(buf []byte, v slog.Value) []byte {
+func (h *PrettyTextHandler) appendAttr(buf []byte, groups []string, a slog.Attr, needSpace bool) ([]byte, bool) {
+	if h.opts.ReplaceAttr != nil {
+		a = h.opts.ReplaceAttr(groups, a)
+		if a.Equal(slog.Attr{}) {
+			return buf, needSpace
+		}
+	}
+
+	if needSpace {
+		buf = append(buf, ' ')
+	}
+	buf = append(buf, h.keyColor()...)
+	if h.group != "" {
+		buf = append(buf, h.group...)
+		buf = append(buf, '.')
+		buf = append(buf, a.Key...)
+	} else {
+		buf = append(buf, a.Key...)
+	}
+	buf = append(buf, h.resetColor()...)
+	buf = append(buf, '=')
+	buf = append(buf, h.valueColor()...)
+	buf = h.appendValue(buf, a.Value)
+	buf = append(buf, h.resetColor()...)
+	return buf, true
+}
+
+func (h *PrettyTextHandler) appendValue(buf []byte, v slog.Value) []byte {
 	switch v.Kind() {
 	case slog.KindString:
 		return append(buf, v.String()...)
@@ -216,25 +357,26 @@ func appendValue(buf []byte, v slog.Value) []byte {
 		return v.Time().AppendFormat(buf, time.RFC3339Nano)
 	case slog.KindGroup:
 		attrs := v.Group()
-		buf = append(buf, colorReset...)
-		buf = append(buf, colorPurple...)
+		buf = append(buf, h.resetColor()...)
+		buf = append(buf, h.groupColor()...)
 		buf = append(buf, '(')
 		for i, attr := range attrs {
 			if i > 0 {
 				buf = append(buf, ' ')
+			} else {
+				buf = append(buf, h.resetColor()...)
 			}
-			buf = append(buf, colorReset...)
-			buf = append(buf, colorKey...)
+			buf = append(buf, h.keyColor()...)
 			buf = append(buf, attr.Key...)
-			buf = append(buf, colorReset...)
+			buf = append(buf, h.resetColor()...)
 			buf = append(buf, '=')
-			buf = append(buf, colorValue...)
-			buf = appendValue(buf, attr.Value)
-			buf = append(buf, colorReset...)
+			buf = append(buf, h.valueColor()...)
+			buf = h.appendValue(buf, attr.Value)
+			buf = append(buf, h.resetColor()...)
 		}
-		buf = append(buf, colorPurple...)
+		buf = append(buf, h.groupColor()...)
 		buf = append(buf, ')')
-		buf = append(buf, colorReset...)
+		buf = append(buf, h.resetColor()...)
 		return buf
 	case slog.KindAny:
 		if bs, ok := byteSlice(v.Any()); ok {
@@ -269,6 +411,7 @@ func appendDuration(buf []byte, d time.Duration) []byte {
 	}
 
 	u := uint64(d)
+	start := len(buf)
 
 	if u < uint64(time.Second) {
 		buf = strconv.AppendFloat(buf, float64(u)/1000000, 'f', -1, 64)
@@ -294,7 +437,8 @@ func appendDuration(buf []byte, d time.Duration) []byte {
 	}
 
 	if neg {
-		buf = append([]byte{'-'}, buf...)
+		buf = append(buf[:start+1], buf[start:]...)
+		buf[start] = '-'
 	}
 
 	return buf

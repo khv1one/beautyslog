@@ -1,12 +1,14 @@
 package beautyslog
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,6 +37,276 @@ func createTestRecord() slog.Record {
 	return r
 }
 
+func TestHandleFieldOrder(t *testing.T) {
+	fixedTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	record := slog.Record{
+		Time:    fixedTime,
+		Level:   slog.LevelInfo,
+		Message: "hello",
+		PC:      0,
+	}
+	record.Add(slog.String("k", "v"))
+
+	tests := []struct {
+		name     string
+		fields   []Field
+		wantSub1 string
+		wantSub2 string
+	}{
+		{
+			name:     "default order",
+			fields:   []Field{TimeField, SourceField, LevelField, MessageField, AttrsField},
+			wantSub1: "12:00:00",
+			wantSub2: "INFO",
+		},
+		{
+			name:     "level first",
+			fields:   []Field{LevelField, MessageField, TimeField},
+			wantSub1: "INFO",
+			wantSub2: "12:00:00",
+		},
+		{
+			name:     "only message and attrs",
+			fields:   []Field{MessageField, AttrsField},
+			wantSub1: "hello",
+			wantSub2: "k", // value has color codes around it
+		},
+		{
+			name:     "message then level",
+			fields:   []Field{MessageField, LevelField},
+			wantSub1: "hello",
+			wantSub2: "INFO",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			h := New(&buf, &HandlerOptions{
+				Level:  slog.LevelDebug,
+				Fields: tt.fields,
+			})
+			if err := h.Handle(context.Background(), record); err != nil {
+				t.Fatalf("Handle error: %v", err)
+			}
+			out := buf.String()
+			if !strings.Contains(out, tt.wantSub1) {
+				t.Errorf("output %q missing %q", out, tt.wantSub1)
+			}
+			if !strings.Contains(out, tt.wantSub2) {
+				t.Errorf("output %q missing %q", out, tt.wantSub2)
+			}
+		})
+	}
+}
+
+func TestHandleCustomLevel(t *testing.T) {
+	fixedTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	record := slog.Record{
+		Time:    fixedTime,
+		Level:   slog.Level(5),
+		Message: "custom",
+		PC:      0,
+	}
+
+	var buf bytes.Buffer
+	h := New(&buf, &HandlerOptions{
+		Level:  slog.LevelDebug,
+		Fields: []Field{LevelField, MessageField},
+	})
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	out := buf.String()
+	want := "WARN+1"
+	if !strings.Contains(out, want) {
+		t.Errorf("output %q missing custom level string %q", out, want)
+	}
+}
+
+func TestHandleSourceField(t *testing.T) {
+	fixedTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	record := slog.Record{
+		Time:    fixedTime,
+		Level:   slog.LevelInfo,
+		Message: "msg",
+		PC:      getPC(),
+	}
+
+	tests := []struct {
+		name       string
+		addSource  bool
+		fields     []Field
+		wantSource bool
+	}{
+		{
+			name:       "source shown",
+			addSource:  true,
+			fields:     []Field{TimeField, SourceField, LevelField, MessageField},
+			wantSource: true,
+		},
+		{
+			name:       "source hidden by option",
+			addSource:  false,
+			fields:     []Field{TimeField, SourceField, LevelField, MessageField},
+			wantSource: false,
+		},
+		{
+			name:       "source omitted from fields",
+			addSource:  true,
+			fields:     []Field{TimeField, LevelField, MessageField},
+			wantSource: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			h := New(&buf, &HandlerOptions{
+				Level:     slog.LevelDebug,
+				AddSource: tt.addSource,
+				Fields:    tt.fields,
+			})
+			if err := h.Handle(context.Background(), record); err != nil {
+				t.Fatalf("Handle error: %v", err)
+			}
+			out := buf.String()
+			hasSource := strings.Contains(out, ".go:")
+			if hasSource != tt.wantSource {
+				t.Errorf("source presence = %v, want %v; output: %q", hasSource, tt.wantSource, out)
+			}
+		})
+	}
+}
+
+func TestHandleSkippedSourceNoExtraSpaces(t *testing.T) {
+	fixedTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	record := slog.Record{
+		Time:    fixedTime,
+		Level:   slog.LevelInfo,
+		Message: "msg",
+		PC:      0, // no source info
+	}
+
+	var buf bytes.Buffer
+	h := New(&buf, &HandlerOptions{
+		Level:     slog.LevelDebug,
+		AddSource: true,
+		Fields:    []Field{TimeField, SourceField, LevelField, MessageField},
+	})
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	out := buf.String()
+
+	// Strip ANSI escape codes and check the boundary where source was skipped.
+	// Expected: "12:00:00 INFO  msg" (one space between time and level,
+	// then two spaces between level and msg due to 5-char level padding).
+	plain := stripANSI(out)
+	want := "12:00:00 INFO  msg"
+	if !strings.HasPrefix(plain, want) {
+		t.Errorf("expected prefix %q, got: %q (raw: %q)", want, plain, out)
+	}
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == ';') {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func TestHandleCustomColors(t *testing.T) {
+	fixedTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	record := slog.Record{
+		Time:    fixedTime,
+		Level:   slog.LevelWarn,
+		Message: "alert",
+		PC:      0,
+	}
+	record.Add(slog.String("key", "val"))
+
+	customYellow := []byte("\033[93m")
+	customCyan := []byte("\033[96m")
+	customReset := []byte("\033[0m")
+
+	var buf bytes.Buffer
+	h := New(&buf, &HandlerOptions{
+		Level: slog.LevelDebug,
+		Fields: []Field{
+			TimeField,
+			LevelField,
+			MessageField,
+			AttrsField,
+		},
+		Colors: &ColorScheme{
+			Time:  customCyan,
+			Warn:  customYellow,
+			Key:   customCyan,
+			Value: customYellow,
+			Reset: customReset,
+		},
+	})
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle error: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, string(customCyan)) {
+		t.Errorf("output missing custom cyan color")
+	}
+	if !strings.Contains(out, string(customYellow)) {
+		t.Errorf("output missing custom yellow color")
+	}
+	if !strings.Contains(out, string(customReset)) {
+		t.Errorf("output missing reset color")
+	}
+}
+
+func TestWithAttrsAndWithGroupCopyOptions(t *testing.T) {
+	h := New(io.Discard, &HandlerOptions{
+		Level:  slog.LevelDebug,
+		Fields: []Field{MessageField, AttrsField},
+		Colors: &ColorScheme{
+			Key: []byte("\033[92m"),
+		},
+	})
+
+	h2 := h.WithAttrs([]slog.Attr{slog.String("a", "1")})
+	h3 := h.WithGroup("g")
+
+	ph2, ok := h2.(*PrettyTextHandler)
+	if !ok {
+		t.Fatalf("WithAttrs did not return *PrettyTextHandler")
+	}
+	if len(ph2.opts.Fields) != 2 {
+		t.Errorf("WithAttrs fields = %v, want 2", len(ph2.opts.Fields))
+	}
+	if ph2.opts.Colors == nil {
+		t.Errorf("WithAttrs Colors = nil, want non-nil")
+	}
+
+	ph3, ok := h3.(*PrettyTextHandler)
+	if !ok {
+		t.Fatalf("WithGroup did not return *PrettyTextHandler")
+	}
+	if len(ph3.opts.Fields) != 2 {
+		t.Errorf("WithGroup fields = %v, want 2", len(ph3.opts.Fields))
+	}
+	if ph3.opts.Colors == nil {
+		t.Errorf("WithGroup Colors = nil, want non-nil")
+	}
+}
+
 func BenchmarkSlogTextHandlerWithSource(b *testing.B) {
 	handler := slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
 		AddSource: true,
@@ -53,7 +325,7 @@ func BenchmarkSlogTextHandlerWithSource(b *testing.B) {
 }
 
 func BenchmarkPrettyTextHandlerWithSource(b *testing.B) {
-	handler := New(io.Discard, &slog.HandlerOptions{
+	handler := New(io.Discard, &HandlerOptions{
 		AddSource: true,
 		Level:     slog.LevelInfo,
 	})
@@ -87,7 +359,7 @@ func BenchmarkSlogTextHandlerWithoutSource(b *testing.B) {
 }
 
 func BenchmarkPrettyTextHandlerWithoutSource(b *testing.B) {
-	handler := New(io.Discard, &slog.HandlerOptions{
+	handler := New(io.Discard, &HandlerOptions{
 		AddSource: false,
 		Level:     slog.LevelInfo,
 	})
@@ -104,7 +376,7 @@ func BenchmarkPrettyTextHandlerWithoutSource(b *testing.B) {
 }
 
 func TestPrint(_ *testing.T) {
-	prettyHandler := New(os.Stdout, &slog.HandlerOptions{
+	prettyHandler := New(os.Stdout, &HandlerOptions{
 		Level:     slog.LevelDebug,
 		AddSource: true,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
