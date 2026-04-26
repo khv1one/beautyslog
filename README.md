@@ -25,6 +25,8 @@ It is **2x faster than the default `slog.TextHandler`** and performs **3x fewer 
 * Fast and allocation‑efficient (`sync.Pool` for buffers)
 * Fully compatible with `log/slog`
 * Supports groups, attributes, `ReplaceAttr`, `AddSource`
+* **Fully customizable** — field order, colors per element, level names/colors, time format
+* Respects `NO_COLOR` environment variable
 * Clean, aligned output
 * Safe for concurrent use
 * Works as a drop‑in replacement for any slog handler
@@ -39,9 +41,9 @@ go get github.com/khv1one/beautyslog
 
 ---
 
-## 🧩 Usage Example
+## 🧩 Usage
 
-### Basic Setup
+### Basic Setup (backward compatible)
 
 ```go
 logger := slog.New(beautyslog.New(os.Stdout, &slog.HandlerOptions{
@@ -81,6 +83,119 @@ handler := beautyslog.New(os.Stdout, &slog.HandlerOptions{
 
 ---
 
+## 🎨 Customization
+
+Use `NewWithConfig` with a `Config` to control every aspect of the output.
+Start from `DefaultConfig()` and tweak only what you need.
+
+### Custom field order
+
+Reorder or omit log line fields:
+
+```go
+cfg := beautyslog.DefaultConfig()
+cfg.Fields = []beautyslog.Field{
+    beautyslog.FieldLevel,
+    beautyslog.FieldTime,
+    beautyslog.FieldMessage,
+    beautyslog.FieldAttributes,
+    // FieldSource omitted — no source line printed
+}
+logger := slog.New(beautyslog.NewWithConfig(os.Stdout, cfg))
+```
+
+### Custom colors per element
+
+Override colors for time, source, message, keys, values, or groups:
+
+```go
+cfg := beautyslog.DefaultConfig()
+cfg.Theme = beautyslog.Theme{
+    Time:    beautyslog.ColorPurple,
+    Source:  beautyslog.ColorGray,
+    Message: "",            // empty → inherits level color
+    Key:     beautyslog.ColorCyan,
+    Value:   beautyslog.ColorWhite,
+    Group:   beautyslog.ColorYellow,
+}
+logger := slog.New(beautyslog.NewWithConfig(os.Stdout, cfg))
+```
+
+Available color constants: `ColorRed`, `ColorGreen`, `ColorYellow`, `ColorBlue`,
+`ColorPurple`, `ColorCyan`, `ColorWhite`, `ColorGray`, `ColorOrange`.
+
+### Custom level names and colors
+
+Rename levels or change their colors:
+
+```go
+cfg := beautyslog.DefaultConfig()
+cfg.LevelConfigs[slog.LevelInfo] = beautyslog.LevelConfig{
+    Name:  "OK",
+    Color: beautyslog.ColorGreen,
+}
+cfg.LevelConfigs[slog.LevelWarn] = beautyslog.LevelConfig{
+    Name:  "SLOW",
+    Color: beautyslog.ColorOrange,
+}
+logger := slog.New(beautyslog.NewWithConfig(os.Stdout, cfg))
+```
+
+### Disabling colors
+
+Set `DisableColors` to strip all ANSI escape sequences:
+
+```go
+cfg := beautyslog.DefaultConfig()
+cfg.DisableColors = true
+logger := slog.New(beautyslog.NewWithConfig(os.Stdout, cfg))
+```
+
+Or set the `NO_COLOR` environment variable (no code changes needed):
+
+```bash
+NO_COLOR=1 ./myapp
+```
+
+`beautyslog` respects the [NO_COLOR](https://no-color.org/) convention automatically.
+
+### Custom time format
+
+```go
+cfg := beautyslog.DefaultConfig()
+cfg.TimeFormat = "2006-01-02 15:04:05"
+logger := slog.New(beautyslog.NewWithConfig(os.Stdout, cfg))
+```
+
+### Full config example
+
+```go
+cfg := beautyslog.DefaultConfig()
+
+// Reorder fields: level first, then time, message, attrs
+cfg.Fields = []beautyslog.Field{
+    beautyslog.FieldLevel,
+    beautyslog.FieldTime,
+    beautyslog.FieldMessage,
+    beautyslog.FieldAttributes,
+}
+
+cfg.Theme.Key   = beautyslog.ColorCyan
+cfg.Theme.Value = beautyslog.ColorWhite
+
+cfg.LevelConfigs[slog.LevelInfo] = beautyslog.LevelConfig{
+    Name:  "OK",
+    Color: beautyslog.ColorGreen,
+}
+
+cfg.TimeFormat = "15:04:05"
+
+logger := slog.New(beautyslog.NewWithConfig(os.Stdout, cfg))
+logger.Info("ready", "addr", ":8080")
+```
+
+---
+
 ## 🧪 Benchmarks
 
 Measured on Apple M1 Pro:
@@ -100,6 +215,7 @@ BenchmarkPrettyTextHandlerWithoutSource-8    2736182        435.6 ns/op         
 
 * Use `WithGroup` for struct‑like hierarchical logs
 * Use `WithAttrs` for shared fields
-* Prefer `ReplaceAttr` for transformations (timestamps, hiding fields)
+* Prefer `NewWithConfig` over `ReplaceAttr` for color/field customization
 * Keep attribute names short for cleaner output
 * Avoid logging giant byte arrays; they render raw
+* Set `NO_COLOR` in production to auto‑disable colors for log files
